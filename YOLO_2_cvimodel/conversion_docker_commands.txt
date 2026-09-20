@@ -1,0 +1,131 @@
+# .onnx -> .cvimodel
+
+# Tendo o modelo YOLO (.pt) em mãos, rodar o yolo_2_onnx.py
+# a partri do .onnx é possível rodar os comandos abaixo para converter para .cvimodel
+
+# ===== FORA DO DOCKER (PowerShell, Windows) =====
+
+# 1. Baixar a imagem do TPU-MLIR (uma vez só)
+docker pull sophgo/tpuc_dev:v3.1
+
+# 2. Criar a pasta de trabalho e colocar dentro dela:
+#    - plate_detector.onnx (exportado via Ultralytics)
+#    - uma pasta calib_images/ com ~200-300 imagens do SEU dataset
+#      (copia direto pelo Explorer ou por comando, ex:)
+mkdir C:\Users\nicol\Documents\YOLO_2_cvimodel\workspace\calib_images
+
+# copia as imagens reais de placa pra dentro dessa pasta
+
+# 3. Subir o container, montando a pasta de trabalho como /workspace
+docker run --privileged --name tcc-tpumlir -v C:\Users\nicol\Documents\YOLO_2_cvimodel\workspace:/workspace -it sophgo/tpuc_dev:v3.1
+
+# ===== DENTRO DO DOCKER (terminal do container) =====
+
+cd /workspace
+
+# 4. Instalar o TPU-MLIR (uma vez por container)
+pip install tpu_mlir[all]==1.7
+
+# 5. ONNX -> MLIR (usa os output_names achados no Netron)
+model_transform \
+  --model_name plate_detector \
+  --model_def plate_detector.onnx \
+  --input_shapes "[[1,3,960,960]]" \
+  --mean "0.0,0.0,0.0" \
+  --scale "0.0039216,0.0039216,0.0039216" \
+  --keep_aspect_ratio \
+  --pixel_format rgb \
+  --output_names "/model.23/cv2.0/cv2.0.2/Conv_output_0,/model.23/cv3.0/cv3.0.2/Conv_output_0,/model.23/cv2.1/cv2.1.2/Conv_output_0,/model.23/cv3.1/cv3.1.2/Conv_output_0,/model.23/cv2.2/cv2.2.2/Conv_output_0,/model.23/cv3.2/cv3.2.2/Conv_output_0" \
+  --test_input calib_images/0a1ba80c-014a-4c68-91dd-521bed73fe19.jpg \
+  --test_result plate_top_outputs.npz \
+  --mlir plate_detector.mlir
+
+model_transform \
+  --model_name character_detector \
+  --model_def character_detector.onnx \
+  --input_shapes "[[1,3,640,640]]" \
+  --mean "0.0,0.0,0.0" \
+  --scale "0.0039216,0.0039216,0.0039216" \
+  --keep_aspect_ratio \
+  --pixel_format rgb \
+  --output_names "/model.23/cv2.0/cv2.0.2/Conv_output_0,/model.23/cv3.0/cv3.0.2/Conv_output_0,/model.23/cv2.1/cv2.1.2/Conv_output_0,/model.23/cv3.1/cv3.1.2/Conv_output_0,/model.23/cv2.2/cv2.2.2/Conv_output_0,/model.23/cv3.2/cv3.2.2/Conv_output_0" \
+  --test_input calib_images-character_detector/7a56824c-0cd5-4792-adc0-5f5e085b4a03_jpg.rf.13419fa81cd51496771b320fbef16d7e.jpg \
+  --test_result character_top_outputs.npz \
+  --mlir character_detector.mlir
+
+# (opcional) Fazer o teste com uma única imagem
+model_deploy \
+  --mlir plate_detector.mlir \
+  --quantize F16 \
+  --processor cv181x \
+  --test_input calib_images/0a1ba80c-014a-4c68-91dd-521bed73fe19.jpg \
+  --test_reference plate_top_outputs.npz \
+  --fuse_preprocess \
+  --tolerance 0.99,0.99 \
+  --model plate_detector_f16.cvimodel
+
+model_deploy \
+  --mlir character_detector.mlir \
+  --quantize F16 \
+  --processor cv181x \
+  --test_input calib_images-character_detector/025abf66-ad59-4e38-9312-02b3ef6c10b1_jpg.rf.923078073126f5626939b22cea1aa499.jpg \
+  --test_reference character_top_outputs.npz \
+  --fuse_preprocess \
+  --tolerance 0.99,0.99 \
+  --model character_detector_f16.cvimodel
+
+# 6. MLIR -> cvimodel F16 (validação rápida, sem calibração)
+#    Tolerância euclidiana relaxada porque F16 acumula arredondamento
+#    normal em logits de magnitude alta — cosseno >0.999 confirma que
+#    o modelo continua "pensando" a mesma coisa.
+model_deploy \
+  --mlir plate_detector.mlir \
+  --quantize F16 \
+  --processor cv181x \
+  --test_input plate_detector_in_f32.npz \
+  --test_reference plate_top_outputs.npz \
+  --tolerance 0.99,0.90 \
+  --model plate_detector_f16.cvimodel
+
+model_deploy \
+  --mlir character_detector.mlir \
+  --quantize F16 \
+  --processor cv181x \
+  --test_input character_detector_in_f32.npz \
+  --test_reference character_top_outputs.npz \
+  --tolerance 0.99,0.90 \
+  --model character_detector_f16.cvimodel
+
+# 7. Calibração INT8 (usa as imagens reais)
+run_calibration plate_detector.mlir \
+  --dataset ./calib_images \
+  --input_num 200 \
+  -o plate_calib_table
+
+run_calibration character_detector.mlir \
+  --dataset ./calib_images-character_detector \
+  --input_num 200 \
+  -o character_calib_table
+
+# 8. MLIR -> cvimodel INT8 (versão de produção, pré-processamento embarcado)
+model_deploy \
+  --mlir plate_detector.mlir \
+  --quantize INT8 \
+  --quant_input \
+  --processor cv181x \
+  --calibration_table plate_calib_table \
+  --customization_format RGB_PACKED \
+  --fuse_preprocess \
+  --aligned_input \
+  --model plate_detector_int8.cvimodel
+
+model_deploy \
+  --mlir character_detector.mlir \
+  --quantize INT8 \
+  --quant_input \
+  --processor cv181x \
+  --calibration_table character_calib_table \
+  --customization_format RGB_PACKED \
+  --fuse_preprocess \
+  --aligned_input \
+  --model character_detector_int8.cvimodel

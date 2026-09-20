@@ -1,0 +1,6 @@
+[submodule "TCC262-PlateDetector"]
+	path = TCC262-PlateDetector
+	url = https://github.com/nzimermann/TCC262-PlateDetector.git
+[submodule "TCC262-CharacterDetector"]
+	path = TCC262-CharacterDetector
+	url = https://github.com/nzimermann/TCC262-CharacterDetector.git
