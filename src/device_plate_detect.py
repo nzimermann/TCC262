@@ -1,27 +1,34 @@
-"""Detecta placas pelo TDL SDK no MilkV Duo S - câmera ao vivo ou imagem estática.
+"""Detecta a placa pelo TDL SDK no MilkV Duo S - câmera ao vivo.
 
 Só roda DIRETO NO DISPOSITIVO (MilkV Duo S) - depende do módulo `tdl`, que só
-existe no Linux embarcado do chip CV181x. Não roda no PC (não é o
-webcam_demo.py - esse aqui não usa Ultralytics nem OpenCV, é o runtime da TPU).
+existe no Linux embarcado do chip CV181x. No PC, o equivalente é o
+webcam_demo.py do submódulo TCC262-PlateDetector (Ultralytics + OpenCV).
 
 A câmera é um recurso exclusivo (VPSS só permite um processo por vez). Antes
-de rodar este script em modo câmera, pare os serviços que já estão usando ela:
+de rodar este script, pare os serviços que já estão usando ela:
     /etc/init.d/S93sscma-supervisor stop
     /etc/init.d/S91sscma-node stop
 
-Objetivo deste script: validar, em separado, que (1) a câmera está lendo frame
-de verdade e (2) o modelo detecta placa de verdade - antes de juntar as duas
-coisas. Sem crop, sem segundo modelo, sem MQTT - isso vem depois.
+Objetivo deste script: validar, em separado, que o plate_detector_int8.cvimodel
+carrega na TPU e acha placa de verdade na câmera, e ver onde ela cai no frame -
+as coordenadas impressas aqui são o que vai virar o recorte do ROI (etapa 2) que
+alimenta o detector de caracteres (etapa 3). Sem recorte, sem segundo modelo,
+sem regex, sem MQTT: isso vem depois.
+
+O modelo foi treinado com imgsz=960 sobre placas ocupando mediana de ~0.3% da
+área da imagem (ver o eda_summary.md do submódulo), ou seja: placa longe, em
+cena aberta de rua. Placa segura perto da câmera é justamente o caso fora da
+distribuição do treino - o mesmo comportamento já observado com o .pt na webcam,
+e não é algo que dê para ajustar por parâmetro aqui. Para testar de perto, o
+modelo certo é o de caracteres (device_char_detect.py).
 
 Usage:
-    # modo câmera ao vivo, imprime cada detecção
+    # loop na câmera, imprime cada placa detectada com as coordenadas
     python3 device_plate_detect.py --model plate_detector_int8.cvimodel
 
-    # salva o primeiro frame lido da câmera em disco, pra abrir e conferir
-    python3 device_plate_detect.py --model plate_detector_int8.cvimodel --save-frame frame.jpg
-
-    # roda o modelo numa imagem já existente, sem tocar na câmera
-    python3 device_plate_detect.py --model plate_detector_int8.cvimodel --source plate.png
+    # mirror e flip são aplicados por padrão (é o que corrige a orientação da
+    # câmera); use --no-mirror / --no-flip para desligar
+    python3 device_plate_detect.py --model plate_detector_int8.cvimodel --no-flip
 """
 
 import argparse
@@ -30,79 +37,121 @@ import time
 
 from tdl import image, nn
 
+# O detector de placa é de classe única: nc=1, names=['placa'] (ver CLASS_NAME
+# em src/data_prep/convert_annotations.py e a checagem do export_model.py, ambos
+# no submódulo TCC262-PlateDetector).
+#
+# O nome sai DAQUI, pelo class_id, e não do `class_name` que o SDK devolve junto
+# da detecção: aquele vem da tabela COCO interna do ModelType.YOLOV8, então num
+# modelo custom ele sai errado (class_id 0 viraria "person" em vez de "placa").
+CLASS_NAMES = ["placa"]
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="caminho do .cvimodel no device")
-    parser.add_argument(
-        "--source",
-        default=None,
-        help="caminho de uma imagem já existente (ex: plate.png) - se passado, roda "
-        "a detecção só nela e sai, sem abrir a câmera",
-    )
-    parser.add_argument(
-        "--save-frame",
-        default=None,
-        help="com --source: salva a imagem com a detecção anotada em texto (classe+score) "
-        "nesse caminho. Sem --source: salva o primeiro frame cru lido da câmera "
-        "(sem anotação), só pra conferir a captura.",
-    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument(
-        "--conf", type=float, default=0.5, help="limiar de confiança (default: 0.5)"
+        "--conf", type=float, default=0.4, help="limiar de confiança (default: 0.4)"
     )
     parser.add_argument(
-        "--mirror",
-        action="store_true",
-        help="espelha horizontalmente (esquerda/direita), em hardware (VPSS)",
+        "--nms",
+        type=float,
+        default=0.45,
+        help="limiar de IoU do NMS (default: 0.45). Ajuda quando o modelo desenha "
+        "várias caixas sobre a mesma placa. Ignorado se o binding do device não "
+        "tiver set_nms_threshold.",
+    )
+    # Na montagem da câmera usada aqui, o frame sai espelhado e de cabeça para
+    # baixo: mirror e flip são o que deixa a imagem na orientação certa, então
+    # ficam LIGADOS por padrão. Os flags abaixo desligam cada um (a correção é
+    # feita em hardware, no VPSS, sem custo de CPU).
+    parser.add_argument(
+        "--no-mirror",
+        dest="mirror",
+        action="store_false",
+        help="desliga o espelhamento horizontal (esquerda/direita), ligado por padrão",
     )
     parser.add_argument(
-        "--flip",
-        action="store_true",
-        help="inverte verticalmente (cima/baixo), em hardware (VPSS)",
+        "--no-flip",
+        dest="flip",
+        action="store_false",
+        help="desliga a inversão vertical (cima/baixo), ligada por padrão",
     )
     return parser.parse_args()
 
 
-def print_detections(dets):
-    if not dets:
-        print("  nenhuma detecção")
-        return
+def load_model(model_path, conf, nms):
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"modelo não encontrado: {model_path}")
+
+    print(f"Carregando modelo: {model_path}")
+    # Sem PreprocessParameters: o mean/scale já foi embutido no próprio cvimodel
+    # na conversão (--fuse_preprocess --quant_input), ver o
+    # YOLO_2_cvimodel/conversion_docker_commands.txt.
+    model = nn.get_model(nn.ModelType.YOLOV8, model_path)
+    model.set_threshold(conf)
+
+    # set_nms_threshold está na doc do SDK, mas não existe em todo build do
+    # binding Python do device (o daqui só tem set_threshold). Sem ele, fica o
+    # NMS padrão interno do modelo.
+    if hasattr(model, "set_nms_threshold"):
+        model.set_nms_threshold(nms)
+        print(f"Limiares: conf={conf:.2f}  nms={nms:.2f}")
+    else:
+        print(
+            f"Limiares: conf={conf:.2f}  nms=padrão do SDK (set_nms_threshold "
+            "não existe neste build - --nms ignorado)"
+        )
+    return model
+
+
+def to_plates(dets):
+    """Traduz as detecções cruas do SDK em (nome, score, x1, y1, x2, y2)."""
+    plates = []
     for d in dets:
-        name = d.get("class_name", d.get("class_id", "?"))
-        score = d.get("score", 0.0)
-        x1, y1 = d.get("x1", 0), d.get("y1", 0)
-        x2, y2 = d.get("x2", 0), d.get("y2", 0)
+        class_id = int(d.get("class_id", -1))
+        name = (
+            CLASS_NAMES[class_id]
+            if 0 <= class_id < len(CLASS_NAMES)
+            else f"?{class_id}"
+        )
+        plates.append(
+            (
+                name,
+                float(d.get("score", 0.0)),
+                float(d.get("x1", 0.0)),
+                float(d.get("y1", 0.0)),
+                float(d.get("x2", 0.0)),
+                float(d.get("y2", 0.0)),
+            )
+        )
+    return plates
+
+
+def print_detections(plates, prefix=""):
+    """Imprime uma linha de resumo e, abaixo, a caixa de cada placa.
+
+    A largura x altura sai junto porque é o que diz se a placa está grande o
+    bastante para o ROI valer alguma coisa no detector de caracteres (etapa 3).
+    """
+    linha = f"{len(plates)} placa(s):"
+    print(f"{prefix} {linha}" if prefix else linha)
+
+    # da maior para a menor: a placa mais próxima é a candidata mais útil a ROI
+    for name, score, x1, y1, x2, y2 in sorted(
+        plates, key=lambda p: (p[4] - p[2]) * (p[5] - p[3]), reverse=True
+    ):
+        largura, altura = x2 - x1, y2 - y1
         print(
-            f"  placa: {name}  score={score:.2f}  "
-            f"bbox=({x1:.0f},{y1:.0f})-({x2:.0f},{y2:.0f})"
+            f"    {name}  score={score:.2f}  "
+            f"bbox=({x1:.0f},{y1:.0f})-({x2:.0f},{y2:.0f})  "
+            f"tam={largura:.0f}x{altura:.0f}"
         )
 
 
-def run_on_image(model, source_path, save_path=None):
-    if not os.path.exists(source_path):
-        raise RuntimeError(f"imagem não encontrada: {source_path}")
-
-    print(f"Lendo imagem: {source_path}")
-    img = image.read(source_path)
-
-    print("Rodando inferência...")
-    dets = model.inference(img)
-    print(f"{len(dets)} detecção(ões):")
-    print_detections(dets)
-
-    if save_path:
-        # image.draw_text exige um frame com endereço físico de buffer (só
-        # frames de cam.read() têm isso) - não funciona em imagem de arquivo.
-        print(
-            "[aviso] --save-frame não é suportado com --source: o SDK só desenha "
-            "em frames vindos da câmera (image.draw_text exige buffer físico de "
-            "hardware, que uma imagem lida de arquivo não tem)."
-        )
-
-
-def run_on_camera(model, args):
+def open_camera(args):
     print(
         f"Abrindo câmera {args.width}x{args.height} "
         f"(mirror={args.mirror}, flip={args.flip})..."
@@ -118,13 +167,14 @@ def run_on_camera(model, args):
     # o pipeline VI/ISP/VPSS leva um instante pra estabilizar depois de aberto -
     # ler direto na sequência pode estourar o timeout do primeiro frame.
     time.sleep(1.0)
+    return cam
 
+
+def run_on_camera(model, cam):
     print("Detectando - Ctrl+C para parar.\n")
     frame_count = 0
     read_failures = 0
-    saved_frame = (
-        args.save_frame is None
-    )  # já "salvo" (i.e. não precisa) se não foi pedido
+
     try:
         while True:
             try:
@@ -141,57 +191,32 @@ def run_on_camera(model, args):
             read_failures = 0
             frame_count += 1
 
-            dets = model.inference(frame)
+            try:
+                plates = to_plates(model.inference(frame))
+            finally:
+                # devolve o buffer de hardware (ION) ao pool. Sem isso o pool
+                # trava depois de alguns frames e cam.read() passa a falhar.
+                cam.release()
 
-            if not saved_frame:
-                for d in dets:
-                    name = d.get("class_name", d.get("class_id", "?"))
-                    score = d.get("score", 0.0)
-                    x1, y1 = d.get("x1", 0), d.get("y1", 0)
-                    label = f"{name} {score:.2f}"
-                    image.draw_text(
-                        frame, label, int(x1), int(y1), color=(0, 255, 0), scale=1.0
-                    )
-
-                jpeg_bytes = image.frame_to_jpeg(frame, quality=90, scale=1.0)
-                with open(args.save_frame, "wb") as f:
-                    f.write(jpeg_bytes)
-                print(
-                    f"[frame {frame_count}] salvo em {args.save_frame} "
-                    f"({len(jpeg_bytes)} bytes, {len(dets)} detecção(ões) anotada(s)) "
-                    "- confira se a imagem está ok"
-                )
-                saved_frame = True
-
-            if not dets:
-                if frame_count % 30 == 0:
-                    print(f"[frame {frame_count}] rodando, sem detecção ainda...")
-                continue
-
-            print(f"[frame {frame_count}] {len(dets)} detecção(ões):")
-            print_detections(dets)
+            if plates:
+                print_detections(plates, prefix=f"[frame {frame_count}]")
+            elif frame_count % 30 == 0:
+                print(f"[frame {frame_count}] rodando, sem detecção ainda...")
 
     except KeyboardInterrupt:
         print("\nInterrompido pelo usuário.")
-    finally:
-        cam.close()
-        print("Câmera fechada.")
 
 
 def main():
     args = parse_args()
+    model = load_model(args.model, args.conf, args.nms)
 
-    if not os.path.exists(args.model):
-        raise RuntimeError(f"modelo não encontrado: {args.model}")
-
-    print(f"Carregando modelo: {args.model}")
-    model = nn.get_model(nn.ModelType.YOLOV8, args.model)
-    model.set_threshold(args.conf)
-
-    if args.source:
-        run_on_image(model, args.source, save_path=args.save_frame)
-    else:
-        run_on_camera(model, args)
+    cam = open_camera(args)
+    try:
+        run_on_camera(model, cam)
+    finally:
+        cam.close()
+        print("Câmera fechada.")
 
 
 if __name__ == "__main__":
