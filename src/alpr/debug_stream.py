@@ -217,6 +217,7 @@ def _status(frame_idx: int, results: Sequence[PlateResult]) -> dict:
                 "roi": f"({r.plate.roi.x},{r.plate.roi.y}) {r.plate.roi.width}x{r.plate.roi.height}",
                 "caracteres": " ".join(f"{c.label}:{c.score:.2f}" for c in sorted(r.chars, key=lambda c: c.x1)),
                 "leitura": r.reading.text if r.reading else None,
+                "leitura_bruta": r.reading.raw if r.reading else None,
                 "valida": r.reading.valid if r.reading else False,
             }
             for r in results

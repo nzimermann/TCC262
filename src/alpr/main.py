@@ -8,7 +8,6 @@ pelas três etapas, e cada uma imprime o que encontrou:
 
 Deploy - copiar tudo para a mesma pasta no device (ex: /root/alpr/):
     src/alpr/*.py
-    TCC262-CharacterDetector/src/inference/plate_reader.py
     models/plate_detector_int8.cvimodel
     models/character_detector_int8.cvimodel
 

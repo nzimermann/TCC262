@@ -21,21 +21,25 @@ class CharStage:
     """
 
     def __init__(self, model_path: str, conf: float) -> None:
-        _require_crop_resize()
+        _require_sdk_functions("crop", "resize")
         self._detector = YoloDetector(model_path, CHAR_CLASSES, conf)
 
     def crop(self, frame: image.Image, roi: Roi) -> image.Image:
-        return image.crop_resize(frame, roi.as_tuple(), MODEL_INPUT_SIZE, MODEL_INPUT_SIZE)
+        # crop + resize em duas chamadas: o crop_resize deste build ignora o ROI e devolve um
+        # buffer vazio (verde) para frame de câmera - confirmado no probe_crop.py
+        region = image.crop(frame, roi.as_tuple())
+        return image.resize(region, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE)
 
     def detect(self, crop: image.Image) -> list[Detection]:
         return self._detector.detect(crop)
 
 
-def _require_crop_resize() -> None:
+def _require_sdk_functions(*names: str) -> None:
     """Falha antes de abrir a câmera se o build do SDK no device não tiver o recorte."""
-    if hasattr(image, "crop_resize"):
+    missing = [name for name in names if not hasattr(image, name)]
+    if not missing:
         return
     available = ", ".join(name for name in dir(image) if not name.startswith("_"))
     raise RuntimeError(
-        f"tdl.image.crop_resize não existe neste build do SDK. Disponível em tdl.image: {available}"
+        f"tdl.image não tem {', '.join(missing)} neste build do SDK. Disponível: {available}"
     )

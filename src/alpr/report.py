@@ -33,10 +33,11 @@ class TerminalReport:
         print(f"    caracteres detectados ({len(chars)}): {listed}")
 
     def reading(self, reading: PlateReading) -> None:
+        corrected = f"  (lido {reading.raw}, corrigido por posição)" if reading.raw != reading.text else ""
         if reading.valid:
-            print(f"    resultado: {reading.text}")
+            print(f"    resultado: {reading.text}{corrected}")
         elif reading.text:
-            print(f'    resultado: descartado - "{reading.text}" fora do padrão de placa')
+            print(f'    resultado: descartado - "{reading.text}" fora do padrão de placa{corrected}')
         else:
             print("    resultado: nada para ler")
 
