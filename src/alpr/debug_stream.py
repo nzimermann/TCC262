@@ -1,61 +1,80 @@
-"""Stream MJPEG de debug: o frame com as detecções e o recorte que entra no modelo de caracteres.
+"""Stream de debug no navegador: o frame com as detecções e o recorte que entra no modelo de caracteres.
 
 Ligado por `main.py --debug-port 8080`; abra http://<ip-da-placa>:8080 no navegador do PC.
-Nada aqui interrompe o pipeline: erro de desenho/encode aparece no painel de status da página.
+Com --source, a página também toca o próprio vídeo (a 30 fps, pelo navegador) sincronizado com
+o device, ao lado do último frame analisado. Nada aqui interrompe o pipeline: erro de
+desenho/encode aparece no painel de status da página.
 """
 
 from __future__ import annotations
 
 import json
+import mimetypes
+import os
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from tdl import image
 
-from char_stage import MODEL_INPUT_SIZE
-from detector import Detection
+from debug_render import CameraRenderer, VideoRenderer
 from pipeline import PlateResult
-from plate_stage import Roi
 
-PLATE_COLOR = (0, 255, 0)
-CHAR_COLOR = (255, 255, 0)
-JPEG_QUALITY = 80
+if TYPE_CHECKING:
+    from video_source import VideoSource
+
 KEPT_ERRORS = 5
+FILE_CHUNK = 64 * 1024
 
-PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><title>ALPR debug</title><style>
+PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>ALPR debug</title><style>
 body{background:#111;color:#ddd;font-family:monospace;margin:16px}
-.row{display:flex;gap:16px;flex-wrap:wrap}.frame{flex:2 1 640px}.crop{flex:1 1 320px}
-img{width:100%;border:1px solid #444;background:#000}
+.row{display:flex;gap:16px;flex-wrap:wrap}.frame{flex:2 1 480px}.crop{flex:1 1 320px}
+img,video{width:100%;border:1px solid #444;background:#000}
 pre{background:#1b1b1b;padding:8px;white-space:pre-wrap}button{font:inherit;padding:6px 12px}
+#leitura{font-size:22px;color:#6f6;min-height:1.3em;margin:4px 0}
 </style></head><body>
 <div class="row">
-<div class="frame"><p>frame (placa em verde, caracteres em amarelo)</p><img src="/frame.mjpg"></div>
+{{VIDEO_PANEL}}
+<div class="frame"><p>{{FRAME_LABEL}} (placa em verde, caracteres em amarelo)</p><p id="leitura"></p><img src="/frame.mjpg"></div>
 <div class="crop"><p>ultimo recorte enviado ao modelo de caracteres</p><img src="/crop.mjpg"></div>
 </div>
 <p><button onclick="save()">salvar frame + recorte no device</button> <span id="saved"></span></p>
 <pre id="status"></pre>
 <script>
-async function poll(){try{const s=await (await fetch('/status')).json();
+function syncVideo(s){const v=document.getElementById('video');
+if(!v||!s.video||v.seeking)return;
+if(Math.abs(v.currentTime-s.video.agora_s)>0.5)v.currentTime=s.video.agora_s}
+function showReading(s){document.getElementById('leitura').textContent=(s.placas||[]).map(p=>
+p.valida?p.leitura:(p.leitura?'descartado: '+p.leitura:'sem leitura')).join('  |  ')}
+async function poll(){try{const s=await (await fetch('/status')).json();syncVideo(s);showReading(s);
 document.getElementById('status').textContent=JSON.stringify(s,null,2)}catch(e){}setTimeout(poll,500)}
 async function save(){const r=await (await fetch('/save')).json();
 document.getElementById('saved').textContent=r.saved.length?r.saved.join('  '):'nada para salvar ainda'}
 poll()
 </script></body></html>"""
 
+VIDEO_PANEL = (
+    '<div class="frame"><p>video {name} (30 fps, tocado pelo navegador)</p>'
+    '<video id="video" src="/video" autoplay muted loop playsinline></video></div>'
+)
+
 
 class DebugStream:
-    def __init__(self, port: int, save_dir: Path) -> None:
+    def __init__(self, port: int, save_dir: Path, video: VideoSource | None = None) -> None:
         self._save_dir = save_dir
         self._saves = 0
+        self._video = video
+        self._renderer = VideoRenderer(video) if video else CameraRenderer(self._error)
+        self._page = _page(video)
         self._cond = threading.Condition()
         self._jpegs: dict[str, bytes | None] = {"frame": None, "crop": None}
         self._seq = {"frame": 0, "crop": 0}
         self._status: dict = {}
         self._errors: list[str] = []
-        self._draw_boxes = True
+        self._last_render_ms = 0.0
 
         self._server = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
         self._server.daemon_threads = True
@@ -70,15 +89,29 @@ class DebugStream:
         self._server.shutdown()
         self._server.server_close()
 
-    def show(self, frame: image.Image, frame_idx: int, results: Sequence[PlateResult]) -> None:
-        """Publica o frame e o recorte da maior placa. Chame antes de devolver o frame à câmera."""
-        crop = next((r.crop for r in results if r.crop is not None), None)
-        if crop is not None:
-            self._publish("crop", crop)
-        self._draw(frame, results)
-        self._publish("frame", frame)
+    @property
+    def page(self) -> bytes:
+        return self._page
+
+    @property
+    def video_path(self) -> str | None:
+        return self._video.path if self._video else None
+
+    def show(
+        self, frame: image.Image, frame_idx: int, results: Sequence[PlateResult], pipeline_ms: float
+    ) -> None:
+        """Publica o recorte da maior placa e o frame desenhado. Chame antes de liberar o frame."""
+        started = time.monotonic()
+        self._publish("crop", lambda: self._renderer.crop_jpeg(frame, results))
+        self._publish("frame", lambda: self._renderer.frame_jpeg(frame, results))
+        # o tempo do debug entra no status do frame seguinte (o deste ainda está sendo medido)
+        status = _status(frame_idx, results)
+        status["tempos_ms"] = {"pipeline": round(pipeline_ms), "debug": round(self._last_render_ms)}
+        if self._video and self._video.current:
+            status["video"] = _video_status(self._video)
         with self._cond:
-            self._status = _status(frame_idx, results)
+            self._status = status
+        self._last_render_ms = (time.monotonic() - started) * 1000
 
     def wait_jpeg(self, key: str, seen: int, timeout: float) -> tuple[bytes | None, int]:
         with self._cond:
@@ -87,7 +120,10 @@ class DebugStream:
 
     def status_json(self) -> bytes:
         with self._cond:
-            return json.dumps({**self._status, "erros": self._errors}, ensure_ascii=False).encode()
+            status = {**self._status, "erros": self._errors}
+        if "video" in status:  # posição do vídeo no instante do pedido: o navegador se alinha a ela
+            status["video"] = {**status["video"], "agora_s": round(self._video.playback_time(), 2)}
+        return json.dumps(status, ensure_ascii=False).encode()
 
     def save_snapshot(self) -> list[str]:
         self._save_dir.mkdir(parents=True, exist_ok=True)
@@ -103,39 +139,18 @@ class DebugStream:
                 saved.append(str(path))
         return saved
 
-    def _publish(self, key: str, img: image.Image) -> None:
+    def _publish(self, key: str, render: Callable[[], bytes | None]) -> None:
         try:
-            jpeg = image.frame_to_jpeg(img, quality=JPEG_QUALITY, scale=1.0)
+            jpeg = render()
         except Exception as exc:  # noqa: BLE001 - debug não pode derrubar o pipeline
-            self._error(f"encode do {key}: {exc!r}")
+            self._error(f"{key}: {exc!r}")
+            return
+        if jpeg is None:
             return
         with self._cond:
             self._jpegs[key] = jpeg
             self._seq[key] += 1
             self._cond.notify_all()
-
-    def _draw(self, frame: image.Image, results: Sequence[PlateResult]) -> None:
-        try:
-            for result in results:
-                if self._draw_boxes:
-                    self._draw_result_boxes(frame, result)
-                box = result.plate.detection
-                image.draw_text(
-                    frame, _label(result), int(box.x1), max(0, int(box.y1) - 30),
-                    color=PLATE_COLOR, scale=1.0,
-                )
-        except Exception as exc:  # noqa: BLE001
-            self._error(f"desenho: {exc!r}")
-
-    def _draw_result_boxes(self, frame: image.Image, result: PlateResult) -> None:
-        box = result.plate.detection
-        try:
-            image.draw_bbox(frame, int(box.x1), int(box.y1), int(box.x2), int(box.y2), PLATE_COLOR, 2)
-            for char in result.chars:
-                image.draw_bbox(frame, *_crop_to_frame(char, result.plate.roi), CHAR_COLOR, 1)
-        except (AttributeError, TypeError) as exc:
-            self._draw_boxes = False
-            self._error(f"draw_bbox indisponível, caixas desligadas: {exc!r}")
 
     def _error(self, message: str) -> None:
         with self._cond:
@@ -149,13 +164,15 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - nome exigido pelo http.server
         stream: DebugStream = self.server.stream
         if self.path == "/":
-            self._send(200, "text/html; charset=utf-8", PAGE)
+            self._send(200, "text/html; charset=utf-8", stream.page)
         elif self.path in ("/frame.mjpg", "/crop.mjpg"):
             self._mjpeg(stream, self.path[1:].split(".")[0])
         elif self.path == "/status":
             self._send(200, "application/json", stream.status_json())
         elif self.path == "/save":
             self._send(200, "application/json", json.dumps({"saved": stream.save_snapshot()}).encode())
+        elif self.path == "/video" and stream.video_path:
+            self._file(stream.video_path)
         else:
             self.send_error(404)
 
@@ -183,29 +200,61 @@ class _Handler(BaseHTTPRequestHandler):
         except ConnectionError:
             pass  # navegador fechou a aba
 
+    def _file(self, path: str) -> None:
+        """Envia o arquivo, atendendo pedidos parciais (Range): o navegador precisa deles para pular no vídeo."""
+        size = os.path.getsize(path)
+        requested = self.headers.get("Range")
+        start, end = _byte_range(requested, size)
+        # todo pedido com Range recebe 206, mesmo "bytes=0-" (o arquivo todo): respondendo 200, o
+        # navegador conclui que o servidor não aceita pedidos parciais e não deixa pular no vídeo
+        self.send_response(206 if requested else 200)
+        self.send_header("Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if requested:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    chunk = f.read(min(FILE_CHUNK, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except ConnectionError:
+            pass  # o navegador cancela pedidos quando pula no vídeo
+
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass  # sem uma linha por request no meio da saída do pipeline
 
 
-def _crop_to_frame(char: Detection, roi: Roi) -> tuple[int, int, int, int]:
-    """Caixa do caractere (coordenadas do recorte 640x640) de volta para o frame."""
-    sx, sy = roi.width / MODEL_INPUT_SIZE, roi.height / MODEL_INPUT_SIZE
-    return (
-        int(roi.x + char.x1 * sx),
-        int(roi.y + char.y1 * sy),
-        int(roi.x + char.x2 * sx),
-        int(roi.y + char.y2 * sy),
-    )
+def _byte_range(header: str | None, size: int) -> tuple[int, int]:
+    """Intervalo pedido em `Range: bytes=a-b` (também `a-` e `-n`); sem cabeçalho, o arquivo inteiro."""
+    if not header or not header.startswith("bytes="):
+        return 0, size - 1
+    first, _, last = header[len("bytes="):].split(",")[0].strip().partition("-")
+    if not first:
+        return max(0, size - int(last)), size - 1
+    return int(first), min(int(last), size - 1) if last else size - 1
 
 
-def _label(result: PlateResult) -> str:
-    """Texto desenhado no frame; só ASCII, a fonte do SDK não tem acento."""
-    score = f"{result.plate.detection.score:.2f}"
-    if result.reading is None:
-        return f"placa {score} | erro na etapa 2"
-    if result.reading.valid:
-        return f"{result.reading.text} ({score})"
-    return f"placa {score} | {len(result.chars)} chars | '{result.reading.text}'"
+def _page(video: VideoSource | None) -> bytes:
+    panel = VIDEO_PANEL.format(name=os.path.basename(video.path)) if video else ""
+    label = "ultimo frame analisado" if video else "frame"
+    return PAGE.replace("{{VIDEO_PANEL}}", panel).replace("{{FRAME_LABEL}}", label).encode()
+
+
+def _video_status(video: VideoSource) -> dict:
+    return {
+        "arquivo": os.path.basename(video.path),
+        "analisado_em_s": round(video.current.time_s, 2),
+        # atraso do ffmpeg em relação ao tempo real: se crescer sem parar, o device não acompanha o vídeo
+        "atraso_s": round(video.current.lag_s, 2),
+        "keyframes_pulados": video.skipped_keyframes,
+    }
 
 
 def _status(frame_idx: int, results: Sequence[PlateResult]) -> dict:

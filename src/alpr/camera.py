@@ -17,6 +17,7 @@ class Camera:
     RETRY_DELAY_S = 0.5
 
     def __init__(self, width: int, height: int, mirror: bool, flip: bool) -> None:
+        self.size = (width, height)
         print(f"Abrindo câmera {width}x{height} (mirror={mirror}, flip={flip})...")
         self._cam = image.Camera(
             width, height, image.ImageFormat.YUV420SP_VU, mirror=mirror, flip=flip

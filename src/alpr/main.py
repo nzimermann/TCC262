@@ -1,7 +1,7 @@
 """Pipeline ALPR no MilkV Duo S: placa -> ROI -> caracteres -> leitura.
 
-Só roda no dispositivo (depende do módulo `tdl`). Cada frame da câmera passa
-pelas três etapas, e cada uma imprime o que encontrou:
+Só roda no dispositivo (depende do módulo `tdl`). Cada frame da câmera (ou de um
+vídeo, com --source) passa pelas três etapas, e cada uma imprime o que encontrou:
     1. plate_stage.py    detecta a placa e define o ROI
     2. char_stage.py     recorta o ROI e detecta os caracteres nele
     3. reading_stage.py  ordena os caracteres e valida no padrão de placa (plate_reader.py)
@@ -21,6 +21,9 @@ Uso:
 
     # com o stream de debug: abra http://<ip-da-placa>:8080 no navegador do PC
     python3 /root/alpr/main.py --debug-port 8080
+
+    # vídeo gravado no lugar da câmera (em loop; analisa 1 keyframe por vez, ver video_source.py)
+    python3 /root/alpr/main.py --source /root/alpr/assets/video1.mp4 --debug-port 8080
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import itertools
+import time
 from pathlib import Path
 
 from camera import Camera
@@ -36,6 +40,7 @@ from debug_stream import DebugStream
 from pipeline import AlprPipeline
 from plate_stage import PlateStage
 from report import TerminalReport
+from video_source import VideoSource
 
 HERE = Path(__file__).resolve().parent
 
@@ -65,20 +70,27 @@ def parse_args() -> argparse.Namespace:
         help="margem somada em cada lado da placa antes do recorte, como fração do tamanho "
         "dela (default: 0.05)",
     )
-    parser.add_argument("--width", type=int, default=1280, help="largura do frame (default: 1280)")
-    parser.add_argument("--height", type=int, default=720, help="altura do frame (default: 720)")
+    parser.add_argument(
+        "--source",
+        default=None,
+        help="vídeo gravado para usar no lugar da câmera, em loop, analisando cada keyframe "
+        "(ex: assets/video1.mp4); "
+        "com ele, --width/--height/--no-mirror/--no-flip são ignorados",
+    )
+    parser.add_argument("--width", type=int, default=1280, help="largura do frame da câmera (default: 1280)")
+    parser.add_argument("--height", type=int, default=720, help="altura do frame da câmera (default: 720)")
     # a montagem da câmera entrega o frame espelhado e de cabeça para baixo: mirror/flip corrigem
     parser.add_argument(
         "--no-mirror",
         dest="mirror",
         action="store_false",
-        help="desliga o espelhamento horizontal, ligado por padrão",
+        help="desliga o espelhamento horizontal da câmera, ligado por padrão",
     )
     parser.add_argument(
         "--no-flip",
         dest="flip",
         action="store_false",
-        help="desliga a inversão vertical, ligada por padrão",
+        help="desliga a inversão vertical da câmera, ligada por padrão",
     )
     parser.add_argument(
         "--debug-port",
@@ -104,30 +116,35 @@ def main() -> None:
     args = parse_args()
     print_config(args)
 
-    pipeline = AlprPipeline(
-        PlateStage(args.plate_model, args.plate_conf, (args.width, args.height), args.roi_margin),
-        CharStage(args.char_model, args.char_conf),
-        TerminalReport(),
-    )
-
     with contextlib.ExitStack() as stack:
-        camera = stack.enter_context(
-            Camera(args.width, args.height, mirror=args.mirror, flip=args.flip)
+        source = stack.enter_context(open_source(args))
+        pipeline = AlprPipeline(
+            PlateStage(args.plate_model, args.plate_conf, source.size, args.roi_margin),
+            CharStage(args.char_model, args.char_conf),
+            TerminalReport(),
         )
         debug = None
         if args.debug_port is not None:
-            debug = stack.enter_context(DebugStream(args.debug_port, Path(args.debug_dir)))
+            video = source if args.source is not None else None
+            debug = stack.enter_context(DebugStream(args.debug_port, Path(args.debug_dir), video))
         print("Rodando - Ctrl+C para parar.\n")
-        run(pipeline, camera, debug)
+        run(pipeline, source, debug)
 
 
-def run(pipeline: AlprPipeline, camera: Camera, debug: DebugStream | None) -> None:
+def open_source(args: argparse.Namespace) -> Camera | VideoSource:
+    if args.source is None:
+        return Camera(args.width, args.height, mirror=args.mirror, flip=args.flip)
+    return VideoSource(args.source)
+
+
+def run(pipeline: AlprPipeline, source: Camera | VideoSource, debug: DebugStream | None) -> None:
     try:
         for frame_idx in itertools.count(1):
-            with camera.frame() as frame:
+            with source.frame() as frame:
+                started = time.monotonic()
                 results = pipeline.process(frame, frame_idx)
                 if debug is not None:
-                    debug.show(frame, frame_idx, results)
+                    debug.show(frame, frame_idx, results, pipeline_ms=(time.monotonic() - started) * 1000)
     except KeyboardInterrupt:
         print("\nInterrompido pelo usuário.")
 
