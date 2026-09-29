@@ -38,8 +38,10 @@ def fix_by_position(text: str) -> str:
     if len(text) != PLATE_LENGTH:
         return text
     return "".join(
-        char.translate(_TO_LETTER) if i in LETTER_POSITIONS
-        else char.translate(_TO_DIGIT) if i in DIGIT_POSITIONS
-        else char
+        (
+            char.translate(_TO_LETTER)
+            if i in LETTER_POSITIONS
+            else char.translate(_TO_DIGIT) if i in DIGIT_POSITIONS else char
+        )
         for i, char in enumerate(text)
     )

@@ -31,14 +31,15 @@ FILE_CHUNK = 64 * 1024
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>ALPR debug</title><style>
 body{background:#111;color:#ddd;font-family:monospace;margin:16px}
-.row{display:flex;gap:16px;flex-wrap:wrap}.frame{flex:2 1 480px}.crop{flex:1 1 320px}
+.row{display:flex;gap:16px;flex-wrap:wrap}.frame{flex:2 1 480px}.crop{flex:0 0 auto}
 img,video{width:100%;border:1px solid #444;background:#000}
+.crop img{width:320px;height:160px}
 pre{background:#1b1b1b;padding:8px;white-space:pre-wrap}button{font:inherit;padding:6px 12px}
 #leitura{font-size:22px;color:#6f6;min-height:1.3em;margin:4px 0}
 </style></head><body>
 <div class="row">
 {{VIDEO_PANEL}}
-<div class="frame"><p>{{FRAME_LABEL}} (placa em verde, caracteres em amarelo)</p><p id="leitura"></p><img src="/frame.mjpg"></div>
+<div class="frame"><p>{{FRAME_LABEL}} (placa em verde, caracteres em amarelo)</p><img src="/frame.mjpg"><p id="leitura"></p></div>
 <div class="crop"><p>ultimo recorte enviado ao modelo de caracteres</p><img src="/crop.mjpg"></div>
 </div>
 <p><button onclick="save()">salvar frame + recorte no device</button> <span id="saved"></span></p>
@@ -63,7 +64,9 @@ VIDEO_PANEL = (
 
 
 class DebugStream:
-    def __init__(self, port: int, save_dir: Path, video: VideoSource | None = None) -> None:
+    def __init__(
+        self, port: int, save_dir: Path, video: VideoSource | None = None
+    ) -> None:
         self._save_dir = save_dir
         self._saves = 0
         self._video = video
@@ -98,7 +101,11 @@ class DebugStream:
         return self._video.path if self._video else None
 
     def show(
-        self, frame: image.Image, frame_idx: int, results: Sequence[PlateResult], pipeline_ms: float
+        self,
+        frame: image.Image,
+        frame_idx: int,
+        results: Sequence[PlateResult],
+        pipeline_ms: float,
     ) -> None:
         """Publica o recorte da maior placa e o frame desenhado. Chame antes de liberar o frame."""
         started = time.monotonic()
@@ -106,14 +113,19 @@ class DebugStream:
         self._publish("frame", lambda: self._renderer.frame_jpeg(frame, results))
         # o tempo do debug entra no status do frame seguinte (o deste ainda está sendo medido)
         status = _status(frame_idx, results)
-        status["tempos_ms"] = {"pipeline": round(pipeline_ms), "debug": round(self._last_render_ms)}
+        status["tempos_ms"] = {
+            "pipeline": round(pipeline_ms),
+            "debug": round(self._last_render_ms),
+        }
         if self._video and self._video.current:
             status["video"] = _video_status(self._video)
         with self._cond:
             self._status = status
         self._last_render_ms = (time.monotonic() - started) * 1000
 
-    def wait_jpeg(self, key: str, seen: int, timeout: float) -> tuple[bytes | None, int]:
+    def wait_jpeg(
+        self, key: str, seen: int, timeout: float
+    ) -> tuple[bytes | None, int]:
         with self._cond:
             self._cond.wait_for(lambda: self._seq[key] != seen, timeout)
             return self._jpegs[key], self._seq[key]
@@ -121,8 +133,13 @@ class DebugStream:
     def status_json(self) -> bytes:
         with self._cond:
             status = {**self._status, "erros": self._errors}
-        if "video" in status:  # posição do vídeo no instante do pedido: o navegador se alinha a ela
-            status["video"] = {**status["video"], "agora_s": round(self._video.playback_time(), 2)}
+        if (
+            "video" in status
+        ):  # posição do vídeo no instante do pedido: o navegador se alinha a ela
+            status["video"] = {
+                **status["video"],
+                "agora_s": round(self._video.playback_time(), 2),
+            }
         return json.dumps(status, ensure_ascii=False).encode()
 
     def save_snapshot(self) -> list[str]:
@@ -170,7 +187,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/status":
             self._send(200, "application/json", stream.status_json())
         elif self.path == "/save":
-            self._send(200, "application/json", json.dumps({"saved": stream.save_snapshot()}).encode())
+            self._send(
+                200,
+                "application/json",
+                json.dumps({"saved": stream.save_snapshot()}).encode(),
+            )
         elif self.path == "/video" and stream.video_path:
             self._file(stream.video_path)
         else:
@@ -208,7 +229,9 @@ class _Handler(BaseHTTPRequestHandler):
         # todo pedido com Range recebe 206, mesmo "bytes=0-" (o arquivo todo): respondendo 200, o
         # navegador conclui que o servidor não aceita pedidos parciais e não deixa pular no vídeo
         self.send_response(206 if requested else 200)
-        self.send_header("Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream")
+        self.send_header(
+            "Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream"
+        )
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))
         if requested:
@@ -235,7 +258,7 @@ def _byte_range(header: str | None, size: int) -> tuple[int, int]:
     """Intervalo pedido em `Range: bytes=a-b` (também `a-` e `-n`); sem cabeçalho, o arquivo inteiro."""
     if not header or not header.startswith("bytes="):
         return 0, size - 1
-    first, _, last = header[len("bytes="):].split(",")[0].strip().partition("-")
+    first, _, last = header[len("bytes=") :].split(",")[0].strip().partition("-")
     if not first:
         return max(0, size - int(last)), size - 1
     return int(first), min(int(last), size - 1) if last else size - 1
@@ -244,7 +267,11 @@ def _byte_range(header: str | None, size: int) -> tuple[int, int]:
 def _page(video: VideoSource | None) -> bytes:
     panel = VIDEO_PANEL.format(name=os.path.basename(video.path)) if video else ""
     label = "ultimo frame analisado" if video else "frame"
-    return PAGE.replace("{{VIDEO_PANEL}}", panel).replace("{{FRAME_LABEL}}", label).encode()
+    return (
+        PAGE.replace("{{VIDEO_PANEL}}", panel)
+        .replace("{{FRAME_LABEL}}", label)
+        .encode()
+    )
 
 
 def _video_status(video: VideoSource) -> dict:
@@ -264,7 +291,10 @@ def _status(frame_idx: int, results: Sequence[PlateResult]) -> dict:
             {
                 "score": round(r.plate.detection.score, 2),
                 "roi": f"({r.plate.roi.x},{r.plate.roi.y}) {r.plate.roi.width}x{r.plate.roi.height}",
-                "caracteres": " ".join(f"{c.label}:{c.score:.2f}" for c in sorted(r.chars, key=lambda c: c.x1)),
+                "caracteres": " ".join(
+                    f"{c.label}:{c.score:.2f}"
+                    for c in sorted(r.chars, key=lambda c: c.x1)
+                ),
                 "leitura": r.reading.text if r.reading else None,
                 "leitura_bruta": r.reading.raw if r.reading else None,
                 "valida": r.reading.valid if r.reading else False,

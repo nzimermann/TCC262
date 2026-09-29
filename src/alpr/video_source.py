@@ -31,7 +31,7 @@ FRAME_TIMEOUT_S = 15.0
 # entregar o keyframe na hora, e quando falta CPU quem cede é o pipeline (analisa o mais recente)
 FFMPEG_NICE = -10
 PREPARE_HINT = (
-    'ffmpeg -i entrada.mp4 -c:v libx264 -crf 18 -bf 0 -pix_fmt yuv420p '
+    "ffmpeg -i entrada.mp4 -c:v libx264 -crf 18 -bf 0 -pix_fmt yuv420p "
     '-force_key_frames "expr:gte(t,n_forced*1)" -an -movflags +faststart saida.mp4'
 )
 
@@ -77,11 +77,15 @@ class VideoSource:
         self._warn_if_not_prepared()
 
         self._cond = threading.Condition()
-        self._latest: tuple[np.ndarray, int, float] | None = None  # (bgr, nº do keyframe desde o início, recebido em)
+        self._latest: tuple[np.ndarray, int, float] | None = (
+            None  # (bgr, nº do keyframe desde o início, recebido em)
+        )
         self._taken = -1
         self._loop = 0
         self._ended = False
-        self._proc = subprocess.Popen(_ffmpeg_command(path), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._proc = subprocess.Popen(
+            _ffmpeg_command(path), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
         self._started_at = time.monotonic()
         _raise_priority(self._proc.pid)
         # lê o pipe sem parar: se o pipeline atrasar, os keyframes velhos são descartados e o
@@ -107,7 +111,9 @@ class VideoSource:
     def frame(self) -> Iterator[image.Image]:
         bgr, index, received_at = self._wait_new_frame()
         loop, position = divmod(index, len(self.info.keyframe_times))
-        if loop > self._loop:  # pela volta, e não por um índice exato: esse keyframe pode ter sido pulado
+        if (
+            loop > self._loop
+        ):  # pela volta, e não por um índice exato: esse keyframe pode ter sido pulado
             print("[vídeo] fim do arquivo - reiniciando")
             self._loop = loop
         self.skipped_keyframes += index - self._taken - 1
@@ -127,11 +133,14 @@ class VideoSource:
     def _wait_new_frame(self) -> tuple[np.ndarray, int, float]:
         with self._cond:
             ready = self._cond.wait_for(
-                lambda: self._ended or (self._latest is not None and self._latest[1] > self._taken),
+                lambda: self._ended
+                or (self._latest is not None and self._latest[1] > self._taken),
                 FRAME_TIMEOUT_S,
             )
             if self._ended or not ready:
-                raise RuntimeError(f"o ffmpeg parou de entregar frames: {self._ffmpeg_error()}")
+                raise RuntimeError(
+                    f"o ffmpeg parou de entregar frames: {self._ffmpeg_error()}"
+                )
             return self._latest
 
     def _read_frames(self) -> None:
@@ -156,16 +165,25 @@ class VideoSource:
     def _ffmpeg_error(self) -> str:
         if self._proc.poll() is None:
             return "timeout (processo ainda rodando)"
-        return self._proc.stderr.read().decode(errors="replace").strip() or f"saiu com código {self._proc.returncode}"
+        return (
+            self._proc.stderr.read().decode(errors="replace").strip()
+            or f"saiu com código {self._proc.returncode}"
+        )
 
     def _warn_if_not_prepared(self) -> None:
         gap = self.info.max_keyframe_gap
         if gap > KEYFRAME_GAP_WARN_S:
-            print(f"[aviso] keyframes a cada até {gap:.1f} s: o pipeline só analisa um frame a cada {gap:.1f} s.")
+            print(
+                f"[aviso] keyframes a cada até {gap:.1f} s: o pipeline só analisa um frame a cada {gap:.1f} s."
+            )
         if self.info.has_b_frames:
-            print("[aviso] o vídeo tem B-frames: cada análise sai com atraso de alguns segundos.")
+            print(
+                "[aviso] o vídeo tem B-frames: cada análise sai com atraso de alguns segundos."
+            )
         if gap > KEYFRAME_GAP_WARN_S or self.info.has_b_frames:
-            print(f"         Para 1 análise por segundo, prepare o vídeo no PC:\n         {PREPARE_HINT}")
+            print(
+                f"         Para 1 análise por segundo, prepare o vídeo no PC:\n         {PREPARE_HINT}"
+            )
 
 
 def _raise_priority(pid: int) -> None:
@@ -174,28 +192,41 @@ def _raise_priority(pid: int) -> None:
     try:
         os.setpriority(os.PRIO_PROCESS, pid, FFMPEG_NICE)
     except PermissionError:
-        print("[aviso] sem permissão para dar prioridade ao ffmpeg (rode como root): o vídeo pode atrasar")
+        print(
+            "[aviso] sem permissão para dar prioridade ao ffmpeg (rode como root): o vídeo pode atrasar"
+        )
 
 
 def probe_video(path: str) -> VideoInfo:
     """Resolução, duração e instantes dos keyframes, lidos pelo ffprobe (sem decodificar o vídeo)."""
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,has_b_frames:format=duration:packet=pts_time,flags",
-            "-of", "json", path,
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,has_b_frames:format=duration:packet=pts_time,flags",
+            "-of",
+            "json",
+            path,
         ],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"o ffprobe não conseguiu ler {path}: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"o ffprobe não conseguiu ler {path}: {result.stderr.strip()}"
+        )
     probe = json.loads(result.stdout)
     if not probe.get("streams"):
         raise RuntimeError(f"{path} não tem trilha de vídeo")
     stream = probe["streams"][0]
     keyframes = sorted(
-        float(p["pts_time"]) for p in probe["packets"] if "K" in p.get("flags", "") and p.get("pts_time", "N/A") != "N/A"
+        float(p["pts_time"])
+        for p in probe["packets"]
+        if "K" in p.get("flags", "") and p.get("pts_time", "N/A") != "N/A"
     )
     if not keyframes:
         raise RuntimeError(f"o ffprobe não achou keyframes em {path}")
@@ -210,12 +241,25 @@ def probe_video(path: str) -> VideoInfo:
 
 def _ffmpeg_command(path: str) -> list[str]:
     return [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-threads", "1",           # sem fila de decodificação multi-thread (menos atraso; o device tem 1 núcleo)
-        "-re",                     # lê no ritmo real do vídeo
-        "-stream_loop", "-1",      # loop infinito
-        "-skip_frame", "nokey",    # decodifica só os keyframes
-        "-i", path,
-        "-an", "-fps_mode", "passthrough",  # um frame de saída por keyframe, sem duplicar para 30 fps
-        "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",  # sem fila de decodificação multi-thread (menos atraso; o device tem 1 núcleo)
+        "-re",  # lê no ritmo real do vídeo
+        "-stream_loop",
+        "-1",  # loop infinito
+        "-skip_frame",
+        "nokey",  # decodifica só os keyframes
+        "-i",
+        path,
+        "-an",
+        "-fps_mode",
+        "passthrough",  # um frame de saída por keyframe, sem duplicar para 30 fps
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "pipe:1",
     ]

@@ -29,15 +29,23 @@ class TerminalReport:
             print("    caracteres detectados: nenhum")
             return
         # da esquerda para a direita só para conferir de olho; a ordem de leitura é a da etapa 3
-        listed = "  ".join(f"{c.label}:{c.score:.2f}" for c in sorted(chars, key=lambda c: c.x1))
+        listed = "  ".join(
+            f"{c.label}:{c.score:.2f}" for c in sorted(chars, key=lambda c: c.x1)
+        )
         print(f"    caracteres detectados ({len(chars)}): {listed}")
 
     def reading(self, reading: PlateReading) -> None:
-        corrected = f"  (lido {reading.raw}, corrigido por posição)" if reading.raw != reading.text else ""
+        corrected = (
+            f"  (lido {reading.raw}, corrigido por posição)"
+            if reading.raw != reading.text
+            else ""
+        )
         if reading.valid:
             print(f"    resultado: {reading.text}{corrected}")
         elif reading.text:
-            print(f'    resultado: descartado - "{reading.text}" fora do padrão de placa{corrected}')
+            print(
+                f'    resultado: descartado - "{reading.text}" fora do padrão de placa{corrected}'
+            )
         else:
             print("    resultado: nada para ler")
 

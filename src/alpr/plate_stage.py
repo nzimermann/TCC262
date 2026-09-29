@@ -34,7 +34,11 @@ class Plate:
 
 class PlateStage:
     def __init__(
-        self, model_path: str, conf: float, frame_size: tuple[int, int], roi_margin: float
+        self,
+        model_path: str,
+        conf: float,
+        frame_size: tuple[int, int],
+        roi_margin: float,
     ) -> None:
         self._detector = YoloDetector(model_path, PLATE_CLASSES, conf)
         self._frame_size = frame_size
@@ -42,8 +46,13 @@ class PlateStage:
 
     def detect(self, frame: image.Image) -> list[Plate]:
         """Placas do frame, da maior (mais próxima da câmera) para a menor."""
-        boxes = sorted(self._detector.detect(frame), key=lambda box: box.area, reverse=True)
-        plates = [Plate(box, roi_around(box, self._roi_margin, self._frame_size)) for box in boxes]
+        boxes = sorted(
+            self._detector.detect(frame), key=lambda box: box.area, reverse=True
+        )
+        plates = [
+            Plate(box, roi_around(box, self._roi_margin, self._frame_size))
+            for box in boxes
+        ]
         return [plate for plate in plates if not plate.roi.is_empty]
 
 

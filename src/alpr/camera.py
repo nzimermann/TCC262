@@ -50,7 +50,11 @@ class Camera:
                 return self._cam.read()
             except RuntimeError as exc:
                 if attempt == self.READ_ATTEMPTS:
-                    raise RuntimeError(f"câmera falhou {attempt} leituras seguidas") from exc
-                print(f"[aviso] falha ao ler frame ({exc}) - tentativa {attempt}/{self.READ_ATTEMPTS}")
+                    raise RuntimeError(
+                        f"câmera falhou {attempt} leituras seguidas"
+                    ) from exc
+                print(
+                    f"[aviso] falha ao ler frame ({exc}) - tentativa {attempt}/{self.READ_ATTEMPTS}"
+                )
                 time.sleep(self.RETRY_DELAY_S)
                 attempt += 1

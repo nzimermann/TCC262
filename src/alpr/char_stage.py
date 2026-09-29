@@ -9,7 +9,9 @@ from tdl import image
 from detector import Detection, YoloDetector
 from plate_stage import Roi
 
-CHAR_CLASSES = tuple(string.digits + string.ascii_uppercase)  # ordem do treino: 0-9, A-Z
+CHAR_CLASSES = tuple(
+    string.digits + string.ascii_uppercase
+)  # ordem do treino: 0-9, A-Z
 MODEL_INPUT_SIZE = 640  # --input_shapes [[1,3,640,640]] da conversão
 
 

@@ -36,11 +36,23 @@ SIZE = MODEL_INPUT_SIZE
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Diagnóstico do crop_resize")
-    parser.add_argument("--image", help="imagem de arquivo para o experimento A (ex: uma imagem de treino 640x640)")
-    parser.add_argument("--plate-model", default=str(HERE / "plate_detector_int8.cvimodel"))
-    parser.add_argument("--char-model", default=str(HERE / "character_detector_int8.cvimodel"))
+    parser.add_argument(
+        "--image",
+        help="imagem de arquivo para o experimento A (ex: uma imagem de treino 640x640)",
+    )
+    parser.add_argument(
+        "--plate-model", default=str(HERE / "plate_detector_int8.cvimodel")
+    )
+    parser.add_argument(
+        "--char-model", default=str(HERE / "character_detector_int8.cvimodel")
+    )
     parser.add_argument("--plate-conf", type=float, default=0.25)
-    parser.add_argument("--max-frames", type=int, default=300, help="desiste se não achar placa nesse tanto de frames")
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=300,
+        help="desiste se não achar placa nesse tanto de frames",
+    )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     return parser.parse_args()
@@ -63,7 +75,9 @@ class Probe:
         self.save(name, img)
         try:
             chars = self._chars.detect(img)
-            print(f"  modelo de caracteres: {len(chars)} -> {''.join(c.label for c in sorted(chars, key=lambda c: c.x1))}")
+            print(
+                f"  modelo de caracteres: {len(chars)} -> {''.join(c.label for c in sorted(chars, key=lambda c: c.x1))}"
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"  modelo de caracteres falhou: {exc!r}")
 
@@ -79,7 +93,9 @@ class Probe:
         cpu_path = OUT_DIR / f"{name}_write.jpg"
         try:
             image.write(img, str(cpu_path))
-            print(f"  image.write   -> {cpu_path.name}  {verdict(cpu_path.read_bytes())}")
+            print(
+                f"  image.write   -> {cpu_path.name}  {verdict(cpu_path.read_bytes())}"
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"  image.write falhou: {exc!r}")
 
@@ -114,11 +130,19 @@ def experiment_file(probe: Probe, path: str) -> None:
     describe(src)
     probe.run("A0_arquivo_original", lambda: src)
     # centro da imagem nos dois formatos: o que estiver certo mostra só o miolo da placa
-    probe.run("A1_arquivo_crop_xywh", lambda: image.crop_resize(src, (160, 160, 320, 320), SIZE, SIZE))
-    probe.run("A2_arquivo_crop_xyxy", lambda: image.crop_resize(src, (160, 160, 480, 480), SIZE, SIZE))
+    probe.run(
+        "A1_arquivo_crop_xywh",
+        lambda: image.crop_resize(src, (160, 160, 320, 320), SIZE, SIZE),
+    )
+    probe.run(
+        "A2_arquivo_crop_xyxy",
+        lambda: image.crop_resize(src, (160, 160, 480, 480), SIZE, SIZE),
+    )
 
 
-def experiments_on_frame(probe: Probe, frame: image.Image, roi: Roi, frame_size: tuple[int, int]) -> None:
+def experiments_on_frame(
+    probe: Probe, frame: image.Image, roi: Roi, frame_size: tuple[int, int]
+) -> None:
     x, y, w, h = roi.as_tuple()
     fw, fh = frame_size
     print(f"\n===== B-F. frame da câmera, ROI da placa ({x},{y}) {w}x{h}")
@@ -126,13 +150,24 @@ def experiments_on_frame(probe: Probe, frame: image.Image, roi: Roi, frame_size:
     describe(frame)
     probe.run("E0_frame_inteiro", lambda: frame)
     probe.run("B1_roi_xywh", lambda: image.crop_resize(frame, (x, y, w, h), SIZE, SIZE))
-    probe.run("B2_roi_xyxy", lambda: image.crop_resize(frame, (x, y, x + w, y + h), SIZE, SIZE))
-    probe.run("C1_frame_inteiro_xywh", lambda: image.crop_resize(frame, (0, 0, fw, fh), SIZE, SIZE))
-    probe.run("F1_crop_depois_resize", lambda: image.resize(image.crop(frame, (x, y, w, h)), SIZE, SIZE))
+    probe.run(
+        "B2_roi_xyxy",
+        lambda: image.crop_resize(frame, (x, y, x + w, y + h), SIZE, SIZE),
+    )
+    probe.run(
+        "C1_frame_inteiro_xywh",
+        lambda: image.crop_resize(frame, (0, 0, fw, fh), SIZE, SIZE),
+    )
+    probe.run(
+        "F1_crop_depois_resize",
+        lambda: image.resize(image.crop(frame, (x, y, w, h)), SIZE, SIZE),
+    )
     probe.run("F2_so_crop", lambda: image.crop(frame, (x, y, w, h)))
     try:
         crop = image.crop_resize(frame, (x, y, w, h), SIZE, SIZE)
-        print(f"\n  atributos do recorte: {[n for n in dir(crop) if not n.startswith('_')]}")
+        print(
+            f"\n  atributos do recorte: {[n for n in dir(crop) if not n.startswith('_')]}"
+        )
     except Exception as exc:  # noqa: BLE001
         print(f"\n  atributos do recorte: indisponível ({exc!r})")
 
@@ -147,15 +182,21 @@ def main() -> None:
     else:
         print("\n(sem --image: experimento A pulado)")
 
-    plates = PlateStage(args.plate_model, args.plate_conf, (args.width, args.height), roi_margin=0.05)
+    plates = PlateStage(
+        args.plate_model, args.plate_conf, (args.width, args.height), roi_margin=0.05
+    )
     with Camera(args.width, args.height, mirror=True, flip=True) as camera:
         print(f"\nProcurando placa (até {args.max_frames} frames)...")
         for frame_idx in range(1, args.max_frames + 1):
             with camera.frame() as frame:
                 found = plates.detect(frame)
                 if found:
-                    print(f"placa no frame {frame_idx}, score={found[0].detection.score:.2f}")
-                    experiments_on_frame(probe, frame, found[0].roi, (args.width, args.height))
+                    print(
+                        f"placa no frame {frame_idx}, score={found[0].detection.score:.2f}"
+                    )
+                    experiments_on_frame(
+                        probe, frame, found[0].roi, (args.width, args.height)
+                    )
                     break
         else:
             print("nenhuma placa encontrada - experimentos B-F não rodaram")

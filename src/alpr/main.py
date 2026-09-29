@@ -46,7 +46,9 @@ HERE = Path(__file__).resolve().parent
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Pipeline ALPR: placa -> ROI -> caracteres -> leitura")
+    parser = argparse.ArgumentParser(
+        description="Pipeline ALPR: placa -> ROI -> caracteres -> leitura"
+    )
     parser.add_argument(
         "--plate-model",
         default=str(HERE / "plate_detector_int8.cvimodel"),
@@ -58,10 +60,16 @@ def parse_args() -> argparse.Namespace:
         help="default: character_detector_int8.cvimodel na pasta deste script",
     )
     parser.add_argument(
-        "--plate-conf", type=float, default=0.25, help="limiar de confiança da placa (default: 0.25)"
+        "--plate-conf",
+        type=float,
+        default=0.25,
+        help="limiar de confiança da placa (default: 0.25)",
     )
     parser.add_argument(
-        "--char-conf", type=float, default=0.4, help="limiar de confiança dos caracteres (default: 0.4)"
+        "--char-conf",
+        type=float,
+        default=0.4,
+        help="limiar de confiança dos caracteres (default: 0.4)",
     )
     parser.add_argument(
         "--roi-margin",
@@ -77,8 +85,18 @@ def parse_args() -> argparse.Namespace:
         "(ex: assets/video1.mp4); "
         "com ele, --width/--height/--no-mirror/--no-flip são ignorados",
     )
-    parser.add_argument("--width", type=int, default=1280, help="largura do frame da câmera (default: 1280)")
-    parser.add_argument("--height", type=int, default=720, help="altura do frame da câmera (default: 720)")
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=1280,
+        help="largura do frame da câmera (default: 1280)",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=720,
+        help="altura do frame da câmera (default: 720)",
+    )
     # a montagem da câmera entrega o frame espelhado e de cabeça para baixo: mirror/flip corrigem
     parser.add_argument(
         "--no-mirror",
@@ -126,7 +144,9 @@ def main() -> None:
         debug = None
         if args.debug_port is not None:
             video = source if args.source is not None else None
-            debug = stack.enter_context(DebugStream(args.debug_port, Path(args.debug_dir), video))
+            debug = stack.enter_context(
+                DebugStream(args.debug_port, Path(args.debug_dir), video)
+            )
         print("Rodando - Ctrl+C para parar.\n")
         run(pipeline, source, debug)
 
@@ -137,14 +157,21 @@ def open_source(args: argparse.Namespace) -> Camera | VideoSource:
     return VideoSource(args.source)
 
 
-def run(pipeline: AlprPipeline, source: Camera | VideoSource, debug: DebugStream | None) -> None:
+def run(
+    pipeline: AlprPipeline, source: Camera | VideoSource, debug: DebugStream | None
+) -> None:
     try:
         for frame_idx in itertools.count(1):
             with source.frame() as frame:
                 started = time.monotonic()
                 results = pipeline.process(frame, frame_idx)
                 if debug is not None:
-                    debug.show(frame, frame_idx, results, pipeline_ms=(time.monotonic() - started) * 1000)
+                    debug.show(
+                        frame,
+                        frame_idx,
+                        results,
+                        pipeline_ms=(time.monotonic() - started) * 1000,
+                    )
     except KeyboardInterrupt:
         print("\nInterrompido pelo usuário.")
 

@@ -42,7 +42,9 @@ class YoloDetector:
     que o SDK devolve vem da tabela COCO interna dele e sai errado em modelo custom.
     """
 
-    def __init__(self, model_path: str, class_names: Sequence[str], conf: float) -> None:
+    def __init__(
+        self, model_path: str, class_names: Sequence[str], conf: float
+    ) -> None:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"modelo não encontrado: {model_path}")
         # sem PreprocessParameters: mean/scale já estão embutidos no cvimodel (--fuse_preprocess)

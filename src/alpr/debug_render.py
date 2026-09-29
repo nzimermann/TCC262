@@ -37,24 +37,41 @@ class CameraRenderer:
         self._on_error = on_error
         self._draw_boxes = True
 
-    def crop_jpeg(self, frame: image.Image, results: Sequence[PlateResult]) -> bytes | None:
+    def crop_jpeg(
+        self, frame: image.Image, results: Sequence[PlateResult]
+    ) -> bytes | None:
         crop = next((r.crop for r in results if r.crop is not None), None)
-        return None if crop is None else image.frame_to_jpeg(crop, quality=JPEG_QUALITY, scale=1.0)
+        return (
+            None
+            if crop is None
+            else image.frame_to_jpeg(crop, quality=JPEG_QUALITY, scale=1.0)
+        )
 
     def frame_jpeg(self, frame: image.Image, results: Sequence[PlateResult]) -> bytes:
         for result in results:
             if self._draw_boxes:
                 self._draw_boxes_of(frame, result)
             box = result.plate.detection
-            image.draw_text(frame, label(result), int(box.x1), max(0, int(box.y1) - 30), color=PLATE_RGB, scale=1.0)
+            image.draw_text(
+                frame,
+                label(result),
+                int(box.x1),
+                max(0, int(box.y1) - 30),
+                color=PLATE_RGB,
+                scale=1.0,
+            )
         return image.frame_to_jpeg(frame, quality=JPEG_QUALITY, scale=1.0)
 
     def _draw_boxes_of(self, frame: image.Image, result: PlateResult) -> None:
         box = result.plate.detection
         try:
-            image.draw_bbox(frame, int(box.x1), int(box.y1), int(box.x2), int(box.y2), PLATE_RGB, 2)
+            image.draw_bbox(
+                frame, int(box.x1), int(box.y1), int(box.x2), int(box.y2), PLATE_RGB, 2
+            )
             for char in result.chars:
-                image.draw_bbox(frame, *crop_to_frame(char, result.plate.roi), CHAR_RGB, 1)
+                image.draw_bbox(
+                    frame, *crop_to_frame(char, result.plate.roi), CHAR_RGB, 1
+                )
         except (AttributeError, TypeError) as exc:
             self._draw_boxes = False
             self._on_error(f"draw_bbox indisponível, caixas desligadas: {exc!r}")
@@ -62,7 +79,8 @@ class CameraRenderer:
 
 class VideoRenderer:
     """Frames de vídeo, sem OpenCV: no device ele dá segfault no mesmo processo que o SDK
-    (cv2.resize e cv2.rectangle quebraram). Caixas desenhadas com numpy; JPEG pelo image.write."""
+    (cv2.resize e cv2.rectangle quebraram). Caixas desenhadas com numpy; JPEG pelo image.write.
+    """
 
     def __init__(self, video: VideoSource) -> None:
         self._video = video
@@ -70,12 +88,16 @@ class VideoRenderer:
         self._frame_file = tmp / "alpr_debug_frame.jpg"
         self._crop_file = tmp / "alpr_debug_crop.jpg"
 
-    def crop_jpeg(self, frame: image.Image, results: Sequence[PlateResult]) -> bytes | None:
+    def crop_jpeg(
+        self, frame: image.Image, results: Sequence[PlateResult]
+    ) -> bytes | None:
         """O próprio recorte que o modelo de caracteres recebeu."""
         crop = next((r.crop for r in results if r.crop is not None), None)
         return None if crop is None else _write_jpeg(crop, self._crop_file)
 
-    def frame_jpeg(self, frame: image.Image, results: Sequence[PlateResult]) -> bytes | None:
+    def frame_jpeg(
+        self, frame: image.Image, results: Sequence[PlateResult]
+    ) -> bytes | None:
         if self._video.current is None:
             return None
         step = VIDEO_PANEL_STEP
@@ -85,8 +107,16 @@ class VideoRenderer:
             plate_box = (int(box.x1), int(box.y1), int(box.x2), int(box.y2))
             _draw_rect(canvas, _scaled(plate_box, step), _bgr(PLATE_RGB), 2)
             for char in result.chars:
-                _draw_rect(canvas, _scaled(crop_to_frame(char, result.plate.roi), step), _bgr(CHAR_RGB), 1)
-        return _write_jpeg(image.Image.from_numpy(canvas, image.ImageFormat.BGR_PACKED), self._frame_file)
+                _draw_rect(
+                    canvas,
+                    _scaled(crop_to_frame(char, result.plate.roi), step),
+                    _bgr(CHAR_RGB),
+                    1,
+                )
+        return _write_jpeg(
+            image.Image.from_numpy(canvas, image.ImageFormat.BGR_PACKED),
+            self._frame_file,
+        )
 
 
 def crop_to_frame(char: Detection, roi: Roi) -> tuple[int, int, int, int]:
@@ -110,7 +140,12 @@ def label(result: PlateResult) -> str:
     return f"placa {score} | {len(result.chars)} chars | '{result.reading.text}'"
 
 
-def _draw_rect(canvas: np.ndarray, box: tuple[int, int, int, int], color: tuple[int, int, int], thickness: int) -> None:
+def _draw_rect(
+    canvas: np.ndarray,
+    box: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    thickness: int,
+) -> None:
     """Contorno da caixa (x1, y1, x2, y2), pintando as 4 bordas direto no array."""
     height, width = canvas.shape[:2]
     x1, x2 = sorted(min(max(x, 0), width - 1) for x in (box[0], box[2]))

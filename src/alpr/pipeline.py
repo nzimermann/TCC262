@@ -24,7 +24,9 @@ class PlateResult:
 
 
 class AlprPipeline:
-    def __init__(self, plates: PlateStage, chars: CharStage, report: TerminalReport) -> None:
+    def __init__(
+        self, plates: PlateStage, chars: CharStage, report: TerminalReport
+    ) -> None:
         self._plates = plates
         self._chars = chars
         self._report = report
