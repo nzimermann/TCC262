@@ -7,12 +7,13 @@ correctly. Also handles 2-row plates (motorcycles: 3 letters, 4 digits)
 the same way as 1-row plates (cars), by splitting rows along the axis
 perpendicular to the reading direction instead of the image's raw y-axis.
 
-`classify_plate` then checks the assembled string against the two valid
+`plate_format` then checks the assembled string against the two valid
 Brazilian plate formats (Mercosul and the older one), to filter out
 partial/garbled reads instead of accepting anything detected.
 """
 
 import re
+from enum import StrEnum
 
 import numpy as np
 
@@ -22,9 +23,18 @@ ROW_GAP_FACTOR = (
     0.5  # gap along the row-separation axis, as a fraction of character size
 )
 
-# LLL#L## (e.g. ABC1D23) and the older LLL#### (e.g. ABC1234)
-_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
-_OLD_FORMAT = re.compile(r"^[A-Z]{3}[0-9]{4}$")
+
+class PlateFormat(StrEnum):
+    """The two valid Brazilian plate formats."""
+
+    MERCOSUL = "mercosul"  # LLL#L## (e.g. ABC1D23)
+    OLD = "antiga"  # LLL#### (e.g. ABC1234)
+
+
+_PATTERNS = {
+    PlateFormat.MERCOSUL: re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$"),
+    PlateFormat.OLD: re.compile(r"^[A-Z]{3}[0-9]{4}$"),
+}
 
 
 def read_plate(detections: list[Detection]) -> str:
@@ -49,9 +59,16 @@ def read_plate(detections: list[Detection]) -> str:
     return "".join(ordered)
 
 
-def classify_plate(text: str) -> bool | None:
+def plate_format(text: str) -> PlateFormat | None:
+    """Return which valid Brazilian plate format `text` matches, or None."""
+    return next(
+        (fmt for fmt, pattern in _PATTERNS.items() if pattern.fullmatch(text)), None
+    )
+
+
+def classify_plate(text: str) -> bool:
     """Return true if `text` matches either valid Brazilian plate format."""
-    return bool(_MERCOSUL.fullmatch(text) or _OLD_FORMAT.fullmatch(text))
+    return plate_format(text) is not None
 
 
 def _plate_axes(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

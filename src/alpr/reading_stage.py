@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from detector import Detection
-from plate_reader import classify_plate, read_plate
+from plate_reader import PlateFormat, plate_format, read_plate
 
 # Placa brasileira de 7 caracteres: posições 1-3 são sempre letra; 4, 6 e 7 sempre dígito;
 # a 5ª é letra na Mercosul (ABC1D23) e dígito na antiga (ABC1234), por isso não é corrigida.
@@ -23,14 +23,18 @@ _TO_DIGIT = str.maketrans("OIBSZG", "018526")
 class PlateReading:
     raw: str  # como saiu do plate_reader, antes da correção por posição
     text: str
-    valid: bool
+    format: PlateFormat | None  # None: fora do padrão de placa
+
+    @property
+    def valid(self) -> bool:
+        return self.format is not None
 
 
 def read_plate_text(chars: Sequence[Detection]) -> PlateReading:
     """Separa as linhas, ordena na ordem de leitura, corrige por posição e valida no padrão de placa."""
     raw = read_plate([(c.label, *c.center, c.width, c.height) for c in chars])
     text = fix_by_position(raw)
-    return PlateReading(raw=raw, text=text, valid=classify_plate(text))
+    return PlateReading(raw=raw, text=text, format=plate_format(text))
 
 
 def fix_by_position(text: str) -> str:
